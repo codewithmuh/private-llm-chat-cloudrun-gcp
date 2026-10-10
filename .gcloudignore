@@ -1,0 +1,11 @@
+# What `gcloud builds submit` does NOT upload to Cloud Build (scripts/deploy.sh).
+# Everything in .gitignore (secrets, .env, node_modules, virtualenvs, Terraform
+# state, downloaded models), plus things the image builds never need.
+#!include:.gitignore
+.git/
+.github/
+infra/
+notes/
+*.md
+!docs/*.md
+!README.md

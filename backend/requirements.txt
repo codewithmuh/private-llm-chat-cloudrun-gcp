@@ -1,0 +1,27 @@
+# Web framework
+Django==5.2.17
+djangorestframework==3.18.1
+django-cors-headers==4.9.0
+whitenoise==6.12.0
+gunicorn==26.2.0
+psycopg[binary]==3.3.6
+
+# Google Cloud: uploads in Cloud Storage (signed download links)
+django-storages[google]==1.14.6
+google-cloud-storage==3.15.1
+
+# Talking to OpenAI-compatible model servers (vLLM, Ollama, LM Studio, ...)
+httpx==0.28.1
+
+# Accounts: authenticator-app codes, QR codes, "Sign in with Google".
+# google-auth also mints the ID tokens that call the private model service.
+pyotp==2.10.0
+segno==1.6.6
+google-auth==2.58.0
+requests==2.34.2
+
+# Reading what people upload: PDFs, Word files, images, OCR fallback
+pypdfium2==5.13.0
+python-docx==1.2.0
+pillow==12.3.0
+pytesseract==0.3.13

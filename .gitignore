@@ -1,0 +1,63 @@
+# --- local-only notes (the working log of how this repo was built) -----------
+notes/
+
+# --- secrets & local config ------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+cred-file/
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+backend/staticfiles/
+backend/media/
+backend/db.sqlite3
+
+# --- node ------------------------------------------------------------------
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+*.tsbuildinfo
+npm-debug.log*
+
+# --- terraform -------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+infra/terraform/terraform.tfvars
+infra/terraform/**/terraform.tfvars
+!infra/terraform/**/*.tfvars.example
+.terraform.tfstate.lock.info
+
+# --- models & data ---------------------------------------------------------
+# Downloaded weights at the repository root (not ml/models/, the preset catalog).
+/models/
+*.safetensors
+*.gguf
+
+# --- os / editors ----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Written by `make up` / `make model` (scripts/up.sh) for the models you downloaded.
+config/models.local.json
+# Written by `make model-deploy` (ml/cloudrun/deploy.py) for your Cloud Run models.
+config/models.cloudrun.json

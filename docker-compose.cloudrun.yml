@@ -1,0 +1,25 @@
+# Use models deployed on Cloud Run GPUs from the local app.
+#
+#   make up-cloud
+#   (= docker compose -f docker-compose.yml -f docker-compose.cloudrun.yml up -d --build)
+#
+# First: make gcp-login, then make model-deploy PRESET=... (it writes
+# config/models.cloudrun.json, which this file loads).
+#
+# The model services are private: every request needs a Google ID token. The
+# api container reads your Google login from ~/.config/gcloud (read-only) and
+# BORROWS the llmchat-invoker service account to get those tokens; the deploy
+# gave your account permission to do that (roles/iam.serviceAccountTokenCreator).
+#
+# Needs in .env: GCP_PROJECT.
+
+services:
+  api:
+    environment:
+      LLM_MODELS_FILE: /config/models.cloudrun.json
+      CLOUDSDK_CONFIG: /gcloud
+      GOOGLE_APPLICATION_CREDENTIALS: /gcloud/application_default_credentials.json
+      GOOGLE_CLOUD_PROJECT: ${GCP_PROJECT:?Set GCP_PROJECT in .env}
+      GOOGLE_IMPERSONATE_SERVICE_ACCOUNT: llmchat-invoker@${GCP_PROJECT}.iam.gserviceaccount.com
+    volumes:
+      - ${HOME}/.config/gcloud:/gcloud:ro

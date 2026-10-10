@@ -1,0 +1,164 @@
+# The whole app on your laptop: `make up` (scripts/up.sh). The first time it
+# asks which AI model to use, downloads it, and fills in .env.
+#
+#   web       http://localhost:3000   the chat UI (Next.js)
+#   api       http://localhost:8000   Django REST API, admin at /admin/
+#   mailpit   http://localhost:8025   every email the app sends (codes, resets)
+#   postgres                          the database
+#   searxng   http://localhost:8888   the web search behind the chat's "Search" button
+#   whisper                           speech to text, behind the microphone button
+#   ollama                            runs the AI model on the CPU (profile "ollama";
+#                                     on a GPU, Docker Model Runner runs it instead)
+#   mock-llm                          a fake model server, for testing the app
+#
+# COMPOSE_PROFILES=ollama in .env (set by `make up`) makes plain
+# `docker compose up -d --build` start Ollama too.
+#   -f docker-compose.cloudrun.yml   use a model deployed on a Cloud Run GPU
+#                                    (make up-cloud; see docs/03-*)
+#
+# Ports can be changed in .env (WEB_PORT, API_PORT, MAILPIT_PORT, SEARCH_PORT, OLLAMA_PORT).
+
+# Not just "llmchat": the AWS version of this repo can live on the same computer.
+name: llmchat-gcp
+
+x-api-env: &api-env
+  DJANGO_SETTINGS_MODULE: config.settings.dev
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-only-not-secret}
+  DB_HOST: postgres
+  DB_NAME: llmchat
+  DB_USER: llmchat
+  DB_PASSWORD: llmchat_local
+  PUBLIC_URL: http://localhost:${WEB_PORT:-3000}
+  CORS_ALLOWED_ORIGINS: http://localhost:${WEB_PORT:-3000}
+  CSRF_TRUSTED_ORIGINS: http://localhost:${WEB_PORT:-3000}
+  EMAIL_PROVIDER: smtp
+  EMAIL_HOST: mailpit
+  EMAIL_PORT: "1025"
+  DEFAULT_FROM_EMAIL: Private LLM Chat <no-reply@llmchat.local>
+  EMAIL_VERIFICATION: ${EMAIL_VERIFICATION:-mandatory}
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+  LLM_MODELS: ${LLM_MODELS:-}
+  LLM_MODELS_FILE: /config/${LLM_MODELS_FILE:-models.mock.json}
+  STORAGE_BACKEND: local
+  MEDIA_ROOT: /app/media
+  WEB_SEARCH_URL: http://searxng:8080
+  SPEECH_TO_TEXT_URL: http://whisper:9000
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: llmchat
+      POSTGRES_USER: llmchat
+      POSTGRES_PASSWORD: llmchat_local
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmchat -d llmchat"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports: ["${MAILPIT_PORT:-8025}:8025"]
+
+  mock-llm:
+    build: ./ml/mock
+
+  # The chat's "Search" button: SearXNG with our settings (search/). The api
+  # calls it at http://searxng:8080; open http://localhost:8888 to try it.
+  searxng:
+    build: ./search
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-local-dev-only-not-secret}
+    ports: ["${SEARCH_PORT:-8888}:8080"]
+
+  # The microphone button: Whisper (whisper.cpp) turns speech into text, on the
+  # CPU, inside Docker, so the audio stays on your computer (speech/). The api
+  # calls it at http://whisper:9000. WHISPER_MODEL=small in .env = more
+  # accurate, slower (rebuild with make up).
+  whisper:
+    build:
+      context: ./speech
+      args:
+        WHISPER_MODEL: ${WHISPER_MODEL:-base}
+
+  api:
+    build:
+      context: ./backend
+      target: api
+    environment:
+      <<: *api-env
+      RUN_BOOTSTRAP: "true"   # migrate + load models on start
+    volumes:
+      - ./config:/config:ro
+      - media:/app/media
+    ports: ["${API_PORT:-8000}:8000"]
+    # So the api can reach the Ollama app when it runs on your computer instead
+    # of in Docker (Docker Desktop has this name built in; Linux needs it here).
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      mock-llm: {condition: service_started}
+      searxng: {condition: service_started}
+      whisper: {condition: service_started}
+      # Only with the "ollama" profile: the model is downloaded before the api starts.
+      ollama-pull: {condition: service_completed_successfully, required: false}
+
+  web:
+    build:
+      # The repository root: the docs pages and the model table are built
+      # from docs/ and ml/models/ (see frontend/Dockerfile).
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      # The web server passes /api/, /admin/ and /django-static/ on to the api
+      # (frontend/src/lib/backend-proxy.ts), so the browser only talks to
+      # localhost:3000, as it only talks to the web service on Cloud Run.
+      API_ORIGIN: http://api:8000
+    ports: ["${WEB_PORT:-3000}:3000"]
+    depends_on: [api]
+
+  # --- the AI model on the CPU, with Ollama (profile "ollama") ---------------
+  # scripts/up.sh enables this profile when MODEL_ENGINE=ollama, downloads
+  # LOCAL_MODEL with a progress bar, and writes config/models.local.json.
+  # Containers get no GPU on a Mac, so when the computer has one it can use,
+  # scripts/up.sh prefers Docker Model Runner (part of Docker Desktop): it runs
+  # the model on the GPU, outside this file, at model-runner.docker.internal.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    environment:
+      # Must match context_window in config/models.local.json (scripts/up.sh).
+      OLLAMA_CONTEXT_LENGTH: "8192"
+      # Keep the model in memory between messages, not just 5 minutes.
+      OLLAMA_KEEP_ALIVE: "30m"
+    volumes: ["ollama:/root/.ollama"]
+    ports: ["${OLLAMA_PORT:-11434}:11434"]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  # Downloads LOCAL_MODEL if it isn't there yet. Already downloaded: it exits at
+  # once, without going online, so the app also starts offline.
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      LOCAL_MODEL: ${LOCAL_MODEL:-}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - '[ -z "$$LOCAL_MODEL" ] || [ "$$LOCAL_MODEL" = mock ] || ollama show "$$LOCAL_MODEL" >/dev/null 2>&1 || ollama pull "$$LOCAL_MODEL"'
+    depends_on:
+      ollama: {condition: service_healthy}
+    restart: "no"
+
+volumes:
+  pgdata:
+  media:
+  ollama:

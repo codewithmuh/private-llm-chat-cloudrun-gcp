@@ -1,0 +1,271 @@
+# Build the api, web, search and speech images and deploy them to Google Cloud.
+#
+# OFF by default, so forks and fresh clones do not fail on every push. Turn it on:
+#   1. Deploy once from your computer (make deploy) with, in terraform.tfvars,
+#        github_repository = "<owner>/<repo>"
+#   2. Repository VARIABLES (Settings -> Secrets and variables -> Actions -> Variables):
+#        GCP_PROJECT                     your project ID
+#        GCP_REGION                      your region (e.g. us-central1)
+#        GCP_WORKLOAD_IDENTITY_PROVIDER  terraform output github_workload_identity_provider
+#        GCP_DEPLOY_SERVICE_ACCOUNT      terraform output github_deploy_service_account
+#        DEPLOY_ENABLED                  true      (deploy on every push to main)
+#   Optional, to let CI run `terraform apply` too (otherwise it only pushes images):
+#        Variable TF_STATE_BUCKET = <bucket from scripts/bootstrap-state.sh>
+#        Secret   TFVARS_B64      = output of: base64 < infra/terraform/terraform.tfvars
+#        Secret   HF_TOKEN        = your Hugging Face token (only for new gated models)
+#        and github_terraform_apply = true in your tfvars (makes the deploy account a project Owner)
+#   Other optional variables: NAME_PREFIX (default llmchat-dev = app-environment),
+#   WEB_SEARCH=false / SPEECH_TO_TEXT=false if you turned those off.
+# Full walkthrough: docs/04-deploy-the-full-stack-on-google-cloud.md, "Deploy from GitHub Actions".
+#
+# No keys live in this file or in GitHub: each run trades GitHub's signed
+# token for short-lived Google credentials (Workload Identity Federation).
+
+name: Deploy to Google Cloud
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "docs/**"
+      - "ml/models/**"
+      - "search/**"
+      - "speech/**"
+      - "infra/terraform/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+# id-token: write lets the job request the token it trades for Google credentials.
+permissions:
+  contents: read
+  id-token: write
+
+# Never two deployments at once; a newer push waits for the running one.
+concurrency:
+  group: deploy-gcp
+  cancel-in-progress: false
+
+env:
+  NAME_PREFIX: ${{ vars.NAME_PREFIX || 'llmchat-dev' }}
+  REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.NAME_PREFIX || 'llmchat-dev' }}
+
+jobs:
+  preflight:
+    name: Check configuration
+    # Push to main runs only when DEPLOY_ENABLED is "true"; a manual run always does.
+    if: github.event_name == 'workflow_dispatch' || vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      terraform: ${{ steps.meta.outputs.terraform }}
+    steps:
+      - name: Check variables
+        env:
+          PROJECT: ${{ vars.GCP_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+          PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: |
+          missing=0
+          for pair in "GCP_PROJECT=$PROJECT" "GCP_REGION=$REGION" \
+                      "GCP_WORKLOAD_IDENTITY_PROVIDER=$PROVIDER" "GCP_DEPLOY_SERVICE_ACCOUNT=$ACCOUNT"; do
+            if [ -z "${pair#*=}" ]; then
+              echo "::error::Repository variable ${pair%%=*} is not set (see the top of .github/workflows/deploy.yml)."
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Image tag and mode
+        id: meta
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          # The commit SHA: every running container maps to exactly one commit.
+          echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          if [ -n "$TF_STATE_BUCKET" ]; then
+            echo "terraform=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "terraform=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.component }}
+    needs: preflight
+    # x86 runners: Cloud Run runs linux/amd64 images.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - component: api
+            context: backend
+            file: backend/Dockerfile
+            target: api
+            build_args: ""
+          - component: web
+            # The repository root: the /docs pages and the model table are
+            # built from docs/ and ml/models/ (see frontend/Dockerfile).
+            context: .
+            file: frontend/Dockerfile
+            target: ""
+            # Empty = the browser calls /api/ on the web service itself.
+            build_args: NEXT_PUBLIC_API_URL=
+          - component: search
+            context: search
+            file: search/Dockerfile
+            target: ""
+            build_args: ""
+          - component: speech
+            context: speech
+            file: speech/Dockerfile
+            target: ""
+            build_args: ""
+    steps:
+      - name: Skip an image that is turned off
+        if: (matrix.component == 'search' && vars.WEB_SEARCH == 'false') || (matrix.component == 'speech' && vars.SPEECH_TO_TEXT == 'false')
+        run: |
+          echo "Turned off in the repository variables: not building ${{ matrix.component }}."
+          echo "SKIP=true" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        if: env.SKIP != 'true'
+
+      - name: Google credentials (Workload Identity Federation)
+        if: env.SKIP != 'true'
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Log in to Artifact Registry
+        if: env.SKIP != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - if: env.SKIP != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        if: env.SKIP != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          build-args: ${{ matrix.build_args }}
+          platforms: linux/amd64
+          push: true
+          # A plain image (no attestation index), like Cloud Build pushes.
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/${{ matrix.component }}:${{ needs.preflight.outputs.image_tag }}
+          # Reuse unchanged layers (pip/npm installs) between runs.
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  terraform:
+    name: Terraform apply
+    needs: [preflight, build]
+    if: needs.preflight.outputs.terraform == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TF_IN_AUTOMATION: "true"
+      IMAGE_TAG: ${{ needs.preflight.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Google credentials (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      # gcloud, for copying the weights of models added since the last deploy.
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ vars.TERRAFORM_VERSION || '1.16.4' }}
+          terraform_wrapper: false
+
+      - name: Write terraform.tfvars from the TFVARS_B64 secret
+        env:
+          TFVARS_B64: ${{ secrets.TFVARS_B64 }}
+        run: |
+          if [ -z "$TFVARS_B64" ]; then
+            echo "::error::Secret TFVARS_B64 is not set. Create it with: base64 < infra/terraform/terraform.tfvars"
+            exit 1
+          fi
+          printf '%s' "$TFVARS_B64" | base64 --decode > infra/terraform/terraform.tfvars
+
+      - name: terraform init (Cloud Storage backend)
+        working-directory: infra/terraform
+        run: |
+          cp backend.tf.example backend.tf
+          terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="prefix=${{ vars.TF_STATE_PREFIX || 'llmchat/dev' }}"
+
+      - name: Copy new models' weights (skipped for models already copied)
+        working-directory: infra/terraform
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          terraform apply -input=false -auto-approve -target=terraform_data.foundation -var "image_tag=$IMAGE_TAG"
+          BUCKET="$(terraform output -raw weights_bucket)"
+          BUILDER="$(terraform output -raw build_service_account)"
+          terraform output -raw weights_to_stage | while read -r model gated; do
+            [ -n "$model" ] || continue
+            flag=""; [ "$gated" = true ] && flag="--gated"
+            python3 ../../ml/cloudrun/deploy.py stage "$model" $flag --bucket="$BUCKET" --service-account="$BUILDER" </dev/null
+          done
+
+      - name: terraform apply
+        working-directory: infra/terraform
+        run: terraform apply -input=false -auto-approve -var "image_tag=$IMAGE_TAG"
+
+      - name: Summary
+        working-directory: infra/terraform
+        run: |
+          {
+            echo "### Deployed \`$IMAGE_TAG\`"
+            echo ""
+            echo "App: $(terraform output -raw app_url)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  images-only:
+    name: Images pushed (no Terraform in CI)
+    needs: [preflight, build]
+    if: needs.preflight.outputs.terraform != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: How to roll out
+        env:
+          IMAGE_TAG: ${{ needs.preflight.outputs.image_tag }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ### Images pushed: \`$IMAGE_TAG\`
+
+          The services are **not** updated yet: this repository has no \`TF_STATE_BUCKET\`
+          variable, so CI does not run Terraform (the Cloud Run services live in Terraform).
+          Roll out from your machine:
+
+          \`\`\`bash
+          git pull
+          IMAGE_TAG=$IMAGE_TAG ./scripts/deploy.sh --skip-build
+          \`\`\`
+
+          To let CI deploy by itself, see docs/04-deploy-the-full-stack-on-google-cloud.md, "Deploy from GitHub Actions".
+          EOF
+          echo "Images pushed with tag $IMAGE_TAG. Roll out: IMAGE_TAG=$IMAGE_TAG ./scripts/deploy.sh --skip-build"

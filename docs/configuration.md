@@ -1,0 +1,187 @@
+# Configuration reference
+
+Everything is configured with environment variables, the same way locally
+(`docker-compose.yml`, `.env`) and on AWS (ECS task definitions, written by
+Terraform). This page lists every variable each container reads.
+
+## Containers at a glance
+
+| Container | Image built from | Port | Command | Health check |
+|---|---|---|---|---|
+| **api** | `backend/Dockerfile` (target `api`) | 8000 | gunicorn (default `CMD`) | `GET /api/health/` |
+| **gpu-controller** | same image as api | — | `python manage.py gpu_controller` | — (a loop; restarts on exit) |
+| **web** | `frontend/Dockerfile` | 3000 | `node server.js` (Next.js standalone) | `GET /healthz` |
+| **mock-llm** (dev only) | `ml/mock/Dockerfile` | 8080 | uvicorn | `GET /health` |
+
+In production, one domain serves everything (CloudFront → ALB):
+
+| Path | Goes to |
+|---|---|
+| `/api/*`, `/admin/*`, `/django-static/*` | api |
+| everything else | web |
+
+Because the browser sees a single origin, cookies and CSRF need no cross-origin setup.
+
+---
+
+## api / gpu-controller (Django)
+
+### Core
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DJANGO_SETTINGS_MODULE` | `config.settings.dev` | `config.settings.production` on AWS |
+| `DJANGO_SECRET_KEY` | dev-only value | **Required** in production. Long random string |
+| `DATABASE_URL` | — | `postgres://user:pass@host:5432/db`. Takes precedence over `DB_*` |
+| `DB_HOST` `DB_PORT` `DB_NAME` `DB_USER` `DB_PASSWORD` | `localhost` `5432` `llmchat` `llmchat` `""` | Used when `DATABASE_URL` is unset. On AWS, `DB_PASSWORD` comes from Secrets Manager |
+| `DB_SSLMODE` | `prefer` | `require` on RDS |
+| `PUBLIC_URL` | `http://localhost:3000` | Where users open the app. Used in email links, and as the default for `CSRF_TRUSTED_ORIGINS` |
+| `ALLOWED_HOSTS` | `*` in dev | Comma-separated host names (production: your CloudFront/custom domain) |
+| `CSRF_TRUSTED_ORIGINS` | `PUBLIC_URL` | Comma-separated full origins |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` in dev | Only needed when web and api are on different origins (local dev) |
+| `PROXY_SSL_HEADER` | `HTTP_X_FORWARDED_PROTO` | Header that tells Django the original request was HTTPS. Behind CloudFront → ALB (HTTP), use `HTTP_CLOUDFRONT_FORWARDED_PROTO` |
+| `RUN_BOOTSTRAP` | `false` | `true` → on container start, run migrations (under a Postgres advisory lock) and sync `LLM_MODELS` into the database |
+| `ENABLE_ADMIN` | `true` | Django admin at `/admin/` (staff users only) |
+| `ADMIN_EMAILS` | `""` | Comma-separated. A user with a **verified** email in this list becomes staff + superuser at login. Simplest way to get into `/admin/` |
+| `LOG_LEVEL` | `INFO` | |
+
+### Accounts & email
+
+| Variable | Default | Notes |
+|---|---|---|
+| `APP_NAME` | `Private LLM Chat` | Shown in emails, TOTP apps, and the UI |
+| `SIGNUP_ENABLED` | `true` | `false` = invite-only (create users in `/admin/`) |
+| `EMAIL_VERIFICATION` | `mandatory` | `mandatory`, `optional` or `none` |
+| `GOOGLE_CLIENT_ID` | `""` | OAuth **Web** client id. Empty hides "Sign in with Google" |
+| `EMAIL_PROVIDER` | `console` | `console` (print to logs), `smtp`, or `ses` |
+| `DEFAULT_FROM_EMAIL` | `Private LLM Chat <no-reply@localhost>` | Must be a verified SES identity when `EMAIL_PROVIDER=ses` |
+| `EMAIL_HOST` `EMAIL_PORT` `EMAIL_HOST_USER` `EMAIL_HOST_PASSWORD` `EMAIL_USE_TLS` | — | For `smtp`. Local dev uses Mailpit (`mailpit:1025`, no TLS) |
+
+### File storage
+
+| Variable | Default | Notes |
+|---|---|---|
+| `STORAGE_BACKEND` | `local` | `local` (a folder) or `s3` |
+| `MEDIA_ROOT` | `backend/media` | For `local` |
+| `S3_BUCKET` | — | For `s3` |
+| `S3_PREFIX` | `uploads/` | Key prefix inside the bucket |
+| `AWS_REGION` | `us-east-1` | Region for S3, SES and SageMaker |
+| `MAX_UPLOAD_MB` | `20` | |
+
+### Models
+
+| Variable | Default | Notes |
+|---|---|---|
+| `LLM_MODELS` | `[]` | JSON list of models, see below. Synced into the database by `python manage.py sync_models` (run by `RUN_BOOTSTRAP`). Models added in `/admin/` are left alone |
+| `LLM_TIMEOUT_SECONDS` | `300` | Upper bound for one answer |
+| `OCR_ENGINE` | `auto` | `auto` (the OCR/vision model if one is ready, else Tesseract), `llm`, `tesseract`, `none` |
+| `TITLE_GENERATION` | `true` | Ask the model for a short title after the first answer |
+| `WEB_SEARCH_URL` | `""` | Base URL of a SearXNG instance (`search/`) for the chat's "Search" button. Empty hides the button. Local: `http://searxng:8080`; AWS: `http://localhost:8080` (the container next to the api, `enable_web_search`) |
+| `WEB_SEARCH_RESULTS` | `5` | Search results put in the prompt |
+| `WEB_SEARCH_PAGES` | `3` | How many of them are opened and read (the others give only their snippet). Each adds about 800 tokens to the prompt |
+| `WEB_SEARCH_TIMEOUT_SECONDS` | `8` | Per request: the search itself, and each page |
+| `SPEECH_TO_TEXT_URL` | `""` | Base URL of a server with OpenAI's transcription API (`POST /v1/audio/transcriptions`), for the microphone button. Empty hides it. Local: `http://whisper:9000` (whisper.cpp, `speech/`); AWS: `http://localhost:9000` (`enable_speech_to_text`). `https://api.openai.com` works too, with a key, but then voice leaves your account |
+| `SPEECH_TO_TEXT_MODEL` | `whisper-1` | Sent as `model`. whisper.cpp ignores it (its model is built into the image) |
+| `SPEECH_TO_TEXT_API_KEY` | `""` | Only for a hosted service |
+| `SPEECH_TO_TEXT_LANGUAGE` | `""` | Empty = detect the language. Or an ISO code (`en`, `ur`...) to force one |
+| `SPEECH_TO_TEXT_TIMEOUT_SECONDS` | `120` | |
+| `SPEECH_MAX_MB` | `10` | Largest recording accepted (16 kHz WAV: about 5 minutes) |
+| `GPU_CONTROLLER_INTERVAL` | `30` | Seconds between controller ticks |
+
+#### `LLM_MODELS` entries
+
+```jsonc
+[
+  {
+    "id": "qwen3-vl-8b",                    // slug used by the API and UI (required)
+    "name": "Qwen3-VL 8B",                   // display name
+    "description": "Chat, vision and OCR",
+    "provider": "sagemaker",                 // "sagemaker" | "openai" | "mock"
+    "model_id": "Qwen/Qwen3-VL-8B-Instruct-FP8", // sent as "model" in the request
+
+    // provider = "openai" (vLLM, Ollama, LM Studio, OpenAI itself, ...)
+    "base_url": "http://ollama:11434/v1",
+    "api_key": "",                           // or "env:OPENAI_API_KEY": read it from that environment variable
+
+    // provider = "sagemaker"
+    "endpoint_name": "llmchat-dev-qwen3-vl-8b",
+    "endpoint_config_name": "llmchat-dev-qwen3-vl-8b-1a2b3c4d", // lets the controller create the endpoint
+    "region": "us-east-1",                   // optional, defaults to AWS_REGION
+    "scaling": "on_demand",                  // "on_demand" | "always_on" | "off" | "manual"
+    "idle_minutes": 30,                      // on_demand: delete after this long unused
+    "hourly_cost_usd": 2.61,                 // shown in the admin
+
+    // capabilities & limits
+    "vision": true,
+    "ocr": true,
+    "context_window": 32768,
+    "max_output_tokens": 4096,
+    "temperature": 0.7,
+    // Extra sampling settings sent with every chat request (not OCR), as the
+    // model card recommends. presence_penalty stops small models from repeating
+    // themselves. top_k is not OpenAI's, but vLLM, llama.cpp and Ollama accept it.
+    "params": {"top_p": 0.8, "top_k": 20, "presence_penalty": 1.5},
+    "default": true,
+    "sort": 10,
+    "enabled": true
+  }
+]
+```
+
+`scaling` (SageMaker only):
+
+| Value | The GPU controller… |
+|---|---|
+| `on_demand` | creates the endpoint when someone chats with the model, and deletes it after `idle_minutes` without use. Cheapest; the first message after a quiet period waits for a cold start (≈ 5–15 min) |
+| `always_on` | keeps the endpoint running |
+| `off` | deletes it and keeps it deleted |
+| `manual` | never touches it. You created the endpoint yourself (e.g. with `ml/sagemaker/deploy.py`) |
+
+**Several models on one endpoint** (the [vLLM router](../ml/vllm-router/README.md)):
+give them the same `endpoint_name`. One of them gets a real `scaling` mode (it
+"owns" the endpoint); the others use `manual` and follow the owner. Chatting
+with any of them wakes the endpoint and keeps it alive.
+
+**Keys for OpenAI-compatible providers:** `LLM_MODELS` is not a secret store (on
+AWS it is visible in the ECS task definition). Write `"api_key": "env:NAME"` and
+provide the environment variable `NAME` from a secret instead.
+
+---
+
+## web (Next.js)
+
+| Variable | When | Default | Notes |
+|---|---|---|---|
+| `NEXT_PUBLIC_API_URL` | **build** time | `""` | Empty = same origin (production). `http://localhost:8000` for local dev |
+| `PORT` | runtime | `3000` | |
+| `HOSTNAME` | runtime | `0.0.0.0` | |
+
+Everything else the UI needs (Google client id, upload limits, app name) is
+fetched at runtime from `GET /api/config/`, so one web image works in every
+environment.
+
+---
+
+## Local development (`.env`)
+
+`docker compose` and `make up` (`scripts/up.sh`) read these from `.env` in the
+repository root. Start from `.env.example`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `WEB_PORT` `API_PORT` `MAILPIT_PORT` `SEARCH_PORT` `OLLAMA_PORT` | `3000` `8000` `8025` `8888` `11434` | Ports on your machine. Change one when another program already uses it |
+| `WHISPER_MODEL` | `base` | The Whisper model built into the speech image: `base` (142 MB, quick), `small` (466 MB, more accurate, slower), or any from [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp). Rebuild after changing it (`make up`) |
+| `SEARXNG_SECRET` | dev-only value | The search engine's secret key (any long random string). On AWS, Terraform generates it |
+| `MODEL_ENGINE` | `""` | Where the model runs: `docker-model-runner` (Docker Desktop's Model Runner, on the GPU), `ollama` (a container, CPU only) or `ollama-app`. Empty = `make up` picks (and asks before turning Model Runner on) |
+| `LOCAL_MODEL` | `""` | The model's name in that engine (e.g. `ai/qwen3-vl:8B`, `qwen3-vl:4b-instruct`), or `mock`. Empty = `make up` asks. `make model` changes both |
+| `COMPOSE_PROFILES` | `""` | `ollama` starts Ollama in Docker. Set by `make up`: only with `MODEL_ENGINE=ollama` |
+| `LLM_MODELS_FILE` | `models.mock.json` | A file in `config/`, mounted into the api container. `make up` sets `models.local.json`, which it writes from the models you downloaded |
+
+---
+
+## mock-llm (local development only)
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MOCK_TOKENS_PER_SECOND` | `40` | Streaming speed of the fake answers |
+| `MOCK_MODEL_NAMES` | `mock-chat,mock-vision` | Model ids it answers to |

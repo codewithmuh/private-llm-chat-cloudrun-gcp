@@ -1,0 +1,82 @@
+/* Top-right on wide screens, top-center on phones: never over the composer. */
+.region {
+  position: fixed;
+  z-index: 1000;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  width: min(400px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+@media (max-width: 767px) {
+  .region {
+    right: 50%;
+    transform: translateX(50%);
+    align-items: center;
+  }
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px 11px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  font-size: 14px;
+  animation: slide-in var(--normal) var(--ease);
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.toast[data-kind="success"] .icon {
+  color: var(--success);
+}
+.toast[data-kind="error"] .icon {
+  color: var(--danger);
+}
+.toast[data-kind="info"] .icon {
+  color: var(--info);
+}
+
+.message {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
