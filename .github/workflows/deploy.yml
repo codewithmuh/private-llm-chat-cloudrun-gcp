@@ -191,7 +191,7 @@ jobs:
           service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
 
       # gcloud, for copying the weights of models added since the last deploy.
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@v3
 
       - uses: hashicorp/setup-terraform@v3
         with:
