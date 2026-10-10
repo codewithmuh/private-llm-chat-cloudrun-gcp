@@ -193,7 +193,7 @@ jobs:
       # gcloud, for copying the weights of models added since the last deploy.
       - uses: google-github-actions/setup-gcloud@v2
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ vars.TERRAFORM_VERSION || '1.16.4' }}
           terraform_wrapper: false
