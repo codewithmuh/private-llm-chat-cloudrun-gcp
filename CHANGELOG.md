@@ -4,12 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]: the Google Cloud version
-
-This repository was forked from the AWS version,
-[private-llm-chat-sagemaker-aws](https://github.com/codewithmuh/private-llm-chat-sagemaker-aws),
-and converted to Google Cloud. The app (chat, accounts and 2FA, files, OCR, web search,
-voice input) is the same; where the models run and how it is deployed changed.
+## [v1.0.0] - 2026-10-26
 
 ### Added
 - Models on **Cloud Run GPUs**: one private Cloud Run service per model, running
